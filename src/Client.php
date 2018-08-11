@@ -383,7 +383,7 @@ class Client
 
         /** Check the protocol version is known */
         if (!in_array(strtoupper($protocolVersion), ['HTTP/1.0', 'HTTP/1.1'])) {
-            
+            return false;
         }
 
 

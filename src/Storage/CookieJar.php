@@ -10,16 +10,53 @@ namespace mbruton\Transport\HTTP;
 
 
 use mbruton\Transport\HTTP\Address\URL;
+use mbruton\Transport\HTTP\Storage\ICookieJar;
 
-class CookieJar
+class CookieJar implements ICookieJar
 {
-    public function getCookiesForURL(URL $url)
-    {
 
+    public function addCookie($cookie)
+    {
+        // TODO: Implement addCookie() method.
     }
 
-    public function getCookiesForURLAsString(URL $url)
+    public function getAllCookies()
     {
-        return '';
+        // TODO: Implement getAllCookies() method.
+    }
+
+    public function getCookiesForURL($url)
+    {
+        $url = $this->normalizeURL($url);
+
+        if ($url === false) {
+            return false;
+        }
+
+
+
+        // TODO: Implement getCookiesForURL() method.
+    }
+
+    public function getCookiesAsHeadersForURL($url)
+    {
+        $url = $this->normalizeURL($url);
+
+        if ($url === false) {
+            return false;
+        }
+        // TODO: Implement getCookiesAsHeadersForURL() method.
+    }
+
+    private function normalizeURL($url) {
+        if (is_string($url)) {
+            $url = URL::fromString($url);
+        }
+
+        if (!is_object($url) && !$url instanceof URL) {
+            return false;
+        }
+
+        return $url;
     }
 }

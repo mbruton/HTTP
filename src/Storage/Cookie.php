@@ -8,7 +8,10 @@
 
 namespace mbruton\Transport\HTTP\Storage;
 
-class Cookie
+class Cookie implements ICookie
 {
-
+    public static function fromString($cookie)
+    {
+        // TODO: Implement fromString() method.
+    }
 }
