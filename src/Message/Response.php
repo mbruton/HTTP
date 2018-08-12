@@ -11,5 +11,9 @@ namespace mbruton\Transport\HTTP\Message;
 
 class Response
 {
-
+    protected $httpVersion;
+    protected $statuCode;
+    protected $statusMessage;
+    protected $headers;
+    protected $body;
 }
