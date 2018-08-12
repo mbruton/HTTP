@@ -10,6 +10,8 @@ namespace mbruton\Transport\HTTP;
 
 
 use mbruton\Transport\HTTP\Address\URL;
+use mbruton\Transport\HTTP\Message\Headers;
+use mbruton\Transport\HTTP\Message\Header;
 use mbruton\Transport\HTTP\Storage\ICookieJar;
 
 class CookieJar implements ICookieJar
@@ -18,6 +20,14 @@ class CookieJar implements ICookieJar
     public function addCookie($cookie)
     {
         // TODO: Implement addCookie() method.
+    }
+
+    /**
+     * @param Headers $headers
+     */
+    public function addCookiesFromHeaders($headers)
+    {
+
     }
 
     public function getAllCookies()

@@ -10,6 +10,8 @@ namespace mbruton\Transport\HTTP;
 
 use mbruton\Transport\HTTP\Address\URL;
 use mbruton\Transport\HTTP\Message\Cookie;
+use mbruton\Transport\HTTP\Message\Header;
+use mbruton\Transport\HTTP\Message\Headers;
 use mbruton\Transport\HTTP\Message\Response;
 
 class Client
@@ -113,6 +115,12 @@ class Client
     const STATUS_LOOP_DETECTED = 508;
     const STATUS_NOT_EXTENDED = 510;
     const STATUS_NETWORK_AUTH_REQUIRED = 511;
+
+    /**
+     * Maximum number of times to follow redirects for a
+     * single request
+     */
+    const MAX_REDIRECTS = 5;
 
     /**
      * The default timeout for connections in seconds
@@ -256,15 +264,18 @@ class Client
     /**
      * Gets a connection for a specific host and port
      *
-     * @param string $host
-     * @param int $port
-     * @param bool $secureConnection
+     * @param URL $url
      * @return int
      *
      */
-    public function getConnection($host, $port = 80, $secureConnection = false)
+    public function getConnection(URL $url)
     {
         return 0;
+    }
+
+    public function closeConnection(URL $url)
+    {
+
     }
 
     /**
@@ -326,7 +337,7 @@ class Client
      *
      * @return Response|false
      */
-    public function request($path = null, $requestType = self::REQUEST_GET, $headers = [], $data = null, $redirectCount = 0)
+    public function request($path = null, $requestType = self::REQUEST_GET, $requestHeaders = [], $data = null, $shouldFollowRedirects = true, $redirectCount = 0)
     {
         /** Check the request type is valid */
         $requestType = trim(strtoupper($requestType));
@@ -335,14 +346,17 @@ class Client
         }
 
         /** Normalise the URL */
-        $requestURL = $this->getFinalURL($path);
+        $requestURL = $path;
+        if (is_string($requestURL)) {
+            $requestURL = URL::fromString($requestURL);
+        }
+
+        if ($this->baseURL instanceof URL) {
+            $requestURL = $this->baseURL->getFinalURL($path);
+        }
 
         /** Get a connection to the host */
-        $socket = $this->getConnection(
-            $requestURL->getHost(),
-            $requestURL->getPort(),
-            $requestURL->getProtocol() == 'https' ? true : false
-        );
+        $socket = $this->getConnection($requestURL);
 
         if (!$socket) {
             return false;
@@ -355,12 +369,13 @@ class Client
         $dataPacket = sprintf("%s %s HTTP/1.1\r\n", $requestType, $requestURL->getAbsolutePath(true));
 
         /** Write the headers */
-        $headers = array_merge(['Host' => $requestURL->getHost()], $headers);
+        $originalHeaders = $requestHeaders;
+        $requestHeaders = array_merge(['Host' => $requestURL->getHost()], $requestHeaders);
         $payloadSize = 0;
         if (!is_null($data) && is_string($data)) {
             $payloadSize = strlen($data);
         }
-        $dataPacket .= $this->buildRequestHeaders($headers, $payloadSize);
+        $dataPacket .= $this->buildRequestHeaders($requestHeaders, $payloadSize);
 
         /** Write the cookies */
         $dataPacket .= $this->cookieJar->getCookiesForURLAsString($requestURL);
@@ -386,19 +401,128 @@ class Client
             return false;
         }
 
+        /** Set the response http version */
+        $response->setHTTPVersion($protocolVersion);
 
+        /** Set the status code and message */
+        $response->setStatusCode(intval($statusCode));
+        $response->setStatusMessage($statusMessage);
 
+        /**
+         * We need to stream the headers from the socket until
+         * we receive a carriage return followed by a line feed.
+         */
+        $headers = new Headers();
+        while("\r\n" != ($data = fgets($socket))) {
+            $headers->addHeader($data);
+        }
 
+        /** Add the headers to the response */
+        $response->setHeaders($headers);
 
+        /** Add any cookies from the headers to the cookie jar */
+        $this->cookieJar->addCookiesFromHeaders($headers);
 
+        /**
+         * HTTP servers return data in one of two ways, they
+         * either return a header 'Content-Length' which tells
+         * us it's safe to pull the entire lot from the stream,
+         * or 'Transfer-Encoding' will be set to 'chunked' and
+         * we will need to pull the length of the chunk and then
+         * the chunk itself, and then repeat until we get a chunk
+         * with a length of 0.
+         */
+
+        /** Check if we have a content length */
+        $contentLength = $headers->getValueForHeader('content-length');
+
+        if (is_null($contentLength)) {
+            /** Check if transfer encoding is chunked */
+            if (strtolower($headers->getHeadersForKey('transfer-encoding')) != 'chunked') {
+                /** Don't know what to do :/ */
+                return false;
+            }
+        }
+
+        /**
+         * Check if we are adding the data to the response
+         * or storing it in a file
+         */
+        if (!is_null($this->outputFilename)) {
+            /** Add to the response */
+            $responseBody = $this->streamDataFromSocket($socket, $contentLength);
+            $response->setBody($responseBody);
+        } else {
+            /** Write to file */
+            $this->streamFileFromSocket($socket, $this->outputFilename, $contentLength);
+            $response->setBodyFilename($this->outputFilename);
+        }
+
+        /** Check if we are required to close the connection */
+        if (strtolower($headers->getValueForHeader('connection')) == 'close') {
+            $this->closeConnection($requestURL);
+        }
+
+        /**
+         * We may have received a status code to redirect, we could
+         * have acted on this before getting the response body, however
+         * that would have left the stream open with data which is
+         * a little rude.
+         */
+
+        /** Check if we are required to redirect and allowed to redirect */
+        if ($shouldFollowRedirects) {
+
+            /** Prevent redirect loops */
+            if ($redirectCount >= self::MAX_REDIRECTS) {
+                /** Unable to follow, return where we are at */
+                return $response;
+            }
+
+            $redirectStatusCodes = [
+                self::STATUS_MOVED_PERMANENTLY,
+                self::STATUS_FOUND,
+                self::STATUS_SEE_OTHER,
+                self::STATUS_TEMPORARY_REDIRECT,
+                self::STATUS_PERMANENT_REDIRECT
+            ];
+
+            if (in_array($response->getStatusCode(), $redirectStatusCodes)) {
+                $redirectURL = URL::fromString($headers->getValueForHeader('location'));
+                /**
+                 * The URL could be a full URL or a path so we need to merge it with the original
+                 */
+                $redirectURL = $requestURL->getFinalURL($redirectURL);
+
+                /**
+                 * If we have a 303 (See Other) we need to redirect as a
+                 * 'GET' without a payload, else we need to do a full
+                 * direct
+                 */
+                if ($response->getStatusCode() == self::STATUS_SEE_OTHER) {
+                    return $this->request($redirectURL);
+                } else {
+                    return $this->request($redirectURL, $requestType, $originalHeaders, $data, $shouldFollowRedirects, $redirectCount++);
+                }
+            }
+        }
+
+        /** Return the response */
+        return $response;
     }
+
 
     public function streamFileToSocket($socket, $filename)
     {
 
     }
 
-    public function streamFileFromSocket($socket, $filename)
+    public function streamFileFromSocket($socket, $filename, $length = null)
+    {
+
+    }
+
+    public function streamDataFromSocket($socket, $length = null)
     {
 
     }
@@ -423,15 +547,7 @@ class Client
         return $output;
     }
 
-    /**
-     * From the given value a URL is made using the value
-     * and the baseURL value
-     * @param $urlOrPath
-     */
-    protected function getFinalURL($urlOrPath)
-    {
 
-    }
 
     /**
      * Makes a HTTP Get request

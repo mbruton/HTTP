@@ -347,6 +347,16 @@ class URL
 
     }
 
+    /**
+     * From the given value a URL is made using the value
+     * and the baseURL value
+     * @param $urlOrPath
+     */
+    public function getFinalURL($urlOrPath)
+    {
+
+    }
+
 
 
 }
