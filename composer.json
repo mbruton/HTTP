@@ -1,0 +1,7 @@
+{
+  "name": "mbruton/HTTP",
+  "description:": "A nataive HTTP client for PHP.",
+  "require-dev": {
+    "phpunit/phpunit": "5.1.*"
+  }
+}
