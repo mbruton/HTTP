@@ -25,7 +25,7 @@ class CookieJar implements ICookieJar
     /**
      * @param Headers $headers
      */
-    public function addCookiesFromHeaders($headers)
+    public function addCookiesFromHeaders(URL $url, Headers $headers)
     {
 
     }

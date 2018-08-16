@@ -109,7 +109,7 @@ class Response
         $this->bodyFilename = $filename;
     }
 
-    public function getBodyFilename($filename)
+    public function getBodyFilename()
     {
         return $this->bodyFilename;
     }

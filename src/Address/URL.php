@@ -276,10 +276,7 @@ class URL
 
     }
 
-    public static function isPath($path)
-    {
 
-    }
 
     public function fromURL($url)
     {
@@ -340,11 +337,6 @@ class URL
         }
 
         return $output;
-    }
-
-    public function fromPath($path)
-    {
-
     }
 
     /**

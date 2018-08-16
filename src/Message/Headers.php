@@ -49,4 +49,19 @@ class Headers
     {
 
     }
+
+    public function toArray()
+    {
+
+    }
+
+    public function toString()
+    {
+        return "";
+    }
+
+    public function __toString()
+    {
+        return $this->toString();
+    }
 }
