@@ -415,9 +415,10 @@ class Client
         /** Check if we support compression */
         $supportedCompressionMethods = [];
 
-        if (function_exists(gzdeflate())) {
-            $supportedCompressionMethods[] = 'deflate';
-        }
+        /** Removing support for this as there is no easy way to inflate large files */
+//        if (function_exists(gzdeflate())) {
+//            $supportedCompressionMethods[] = 'deflate';
+//        }
 
         if (function_exists(gzdecode())) {
             $supportedCompressionMethods[] = 'decode';
@@ -723,14 +724,59 @@ class Client
         return true;
     }
 
-    public function decompressBody(&$response)
+    protected function decompressBody(&$response)
     {
         $contentEncoding = strtolower($response->getHeaders()->getHeaderForKey('content-encoding'));
         if (!in_array($contentEncoding, ['gzip', 'deflate'])) {
             return true;
         }
 
-        // @todo ...
+        /** Check if we have a response body or file */
+        if (!is_null($response->getBody())) {
+            if ($contentEncoding == 'deflate') {
+                /** NOTE: This is currently not supported by the headers sent */
+                $response->setBody(gzinflate($response->getBody()));
+            } elseif ($contentEncoding == 'gzip') {
+                $response->setBody(gzdecode($response->getBody()));
+            }
+
+            return true;
+        } elseif (!is_null($response->getBodyFilename())) {
+            /** Open the file if we are able */
+            $compressedFileHandle = gzopen($response->getBodyFilename(), 'r');
+
+            if (!$compressedFileHandle) {
+                return false;
+            }
+
+            /** Open a temp file to hold our output */
+            $filename = sys_get_temp_dir();
+            $filename .= md5(date('Ymdhis') . rand(0, 65536));
+            $fileHandle = fopen($filename, 'wb');
+
+            if (!$fileHandle) {
+                return false;
+            }
+
+            /** Uncompress the file */
+            while(!feof($compressedFileHandle)) {
+                fwrite($fileHandle, gzread($compressedFileHandle, 10000));
+            }
+
+            /** Close both files */
+            fclose($fileHandle);
+            gzclose($compressedFileHandle);
+
+            /** Remove the original (compressed version) */
+            unlink($response->getBodyFilename());
+
+            /** Move the temp file to the originals place */
+            rename($filename, $response->getBodyFilename());
+
+            return true;
+        }
+
+        return false;
     }
 
     /**
@@ -827,217 +873,20 @@ class Client
             return false;
         }
 
-        /** Decompress the body as needed */
-
-
-//        /** Get a connection to the host */
-//        $socket = $this->getConnection($requestURL);
-//
-//        if (!$socket) {
-//            return false;
-//        }
-
-        /** Build a ResponseObject */
-        $response = new Response();
-
-        /** Write the protocol header */
-        $dataPacket = sprintf("%s %s HTTP/1.1\r\n", $requestType, $requestURL->getAbsolutePath(true));
-
-        /** Write the headers */
-        $originalHeaders = $requestHeaders;
-        $requestHeaders = array_merge(['Host' => $requestURL->getHost()], $requestHeaders);
-        $payloadSize = 0;
-        if (!is_null($data) && is_string($data)) {
-            $payloadSize = strlen($data);
-        }
-        $dataPacket .= $this->buildRequestHeaders($requestHeaders, $payloadSize);
-
-        /** Write the cookies */
-        $dataPacket .= $this->cookieJar->getCookiesForURLAsString($requestURL);
-
-        /** Send the packet down the socket */
-        fwrite($socket, $dataPacket, strlen($dataPacket));
-
-        /** Send the data or stream the file */
-        if (!is_null($data)) {
-            fwrite($socket, $data, strlen($data));
-        } elseif (!is_null($this->payloadFilename)) {
-            $this->streamFileFromSocket($socket, $this->payloadFilename);
-        }
-
-        /** Read the first line of the response */
-        $responseStatus = fgets($socket);
-
-        /** Break the status into parts */
-        list($protocolVersion, $statusCode, $statusMessage) = explode("=", $responseStatus);
-
-        /** Check the protocol version is known */
-        if (!in_array(strtoupper($protocolVersion), ['HTTP/1.0', 'HTTP/1.1'])) {
-            return false;
-        }
-
-        /** Set the response http version */
-        $response->setHTTPVersion($protocolVersion);
-
-        /** Set the status code and message */
-        $response->setStatusCode(intval($statusCode));
-        $response->setStatusMessage($statusMessage);
-
-        /**
-         * We need to stream the headers from the socket until
-         * we receive a carriage return followed by a line feed.
-         */
-        $headers = new Headers();
-        while("\r\n" != ($data = fgets($socket))) {
-            $headers->addHeader($data);
-        }
-
-        /** Add the headers to the response */
-        $response->setHeaders($headers);
-
-        /** Add any cookies from the headers to the cookie jar */
-        $this->cookieJar->addCookiesFromHeaders($headers);
-
-        /**
-         * HTTP servers return data in one of two ways, they
-         * either return a header 'Content-Length' which tells
-         * us it's safe to pull the entire lot from the stream,
-         * or 'Transfer-Encoding' will be set to 'chunked' and
-         * we will need to pull the length of the chunk and then
-         * the chunk itself, and then repeat until we get a chunk
-         * with a length of 0.
-         */
-
-        /** Check if we have a content length */
-        $contentLength = $headers->getValueForHeader('content-length');
-
-        if (is_null($contentLength)) {
-            /** Check if transfer encoding is chunked */
-            if (strtolower($headers->getHeadersForKey('transfer-encoding')) != 'chunked') {
-                /** Don't know what to do :/ */
-                return false;
-            }
-        }
-
-        /**
-         * Check if we are adding the data to the response
-         * or storing it in a file
-         */
-        if (!is_null($this->outputFilename)) {
-            /** Add to the response */
-            $responseBody = $this->streamDataFromSocket($socket, $contentLength);
-            $response->setBody($responseBody);
-        } else {
-            /** Write to file */
-            $this->streamFileFromSocket($socket, $this->outputFilename, $contentLength);
-            $response->setBodyFilename($this->outputFilename);
-        }
-
-        /** Check if we are required to close the connection */
-        if (strtolower($headers->getValueForHeader('connection')) == 'close') {
+        /** Should we disconnect from the server? */
+        if (strtolower($response->getHeaders()->getHeaderForKey('connection')) == 'close') {
             $this->closeConnection($requestURL);
         }
 
-        /**
-         * We may have received a status code to redirect, we could
-         * have acted on this before getting the response body, however
-         * that would have left the stream open with data which is
-         * a little rude.
-         */
-
-        /** Check if we are required to redirect and allowed to redirect */
-        if ($shouldFollowRedirects) {
-
-            /** Prevent redirect loops */
-            if ($redirectCount >= self::MAX_REDIRECTS) {
-                /** Unable to follow, return where we are at */
-                return $response;
-            }
-
-            $redirectStatusCodes = [
-                Status::STATUS_MOVED_PERMANENTLY,
-                Status::STATUS_FOUND,
-                Status::STATUS_SEE_OTHER,
-                Status::STATUS_TEMPORARY_REDIRECT,
-                Status::STATUS_PERMANENT_REDIRECT
-            ];
-
-            if (in_array($response->getStatusCode(), $redirectStatusCodes)) {
-                $redirectURL = URL::fromString($headers->getValueForHeader('location'));
-                /**
-                 * The URL could be a full URL or a path so we need to merge it with the original
-                 */
-                $redirectURL = $requestURL->getFinalURL($redirectURL);
-
-                /**
-                 * If we have a 303 (See Other) we need to redirect as a
-                 * 'GET' without a payload, else we need to do a full
-                 * direct
-                 */
-                if ($response->getStatusCode() == Status::STATUS_SEE_OTHER) {
-                    return $this->request($redirectURL);
-                } else {
-                    return $this->request($redirectURL, $requestType, $originalHeaders, $data, $shouldFollowRedirects, $redirectCount++);
-                }
-            }
+        /** Decompress the body as needed */
+        if (!$this->decompressBody($response)) {
+            return false;
         }
 
         /** Return the response */
         return $response;
     }
 
-
-    public function streamFileToSocket($socket, $filename)
-    {
-
-    }
-
-    public function streamFileFromSocket($socket, $filename, $length = null)
-    {
-
-    }
-
-    public function streamDataFromSocket($socket, $length = null)
-    {
-
-    }
-
-    public function sentToSocket($socket, $data)
-    {
-
-    }
-
-    public function getFromSocket($socket, $length = null)
-    {
-
-    }
-
-    public function buildRequestHeaders(array $headers, $payloadSize = null)
-    {
-        $output = '';
-
-        /** @todo Include Accept-Encoding */
-        /** @todo If payloadSize null, check if theres an payloadFile */
-
-        return $output;
-    }
-
-
-
-    /**
-     * Makes a HTTP Get request
-     *
-     * @param string $path
-     * A path relative to 'baseURL' or an absolute URL
-     *
-     * @param string[] $headers
-     *
-     * @return Response
-     */
-    public function get($path, $headers = [])
-    {
-
-    }
 
 
 
